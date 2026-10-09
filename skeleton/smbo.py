@@ -20,13 +20,13 @@ def optimise_smbo(
     n_trees: int,
     seed: int,
 ) -> tuple[Config, Any]:
-    """TODO: use SMBO to choose configurations based on previous evaluations.
+    """SMBO with an Extra Trees surrogate (sambo.Optimizer).
 
-    Use the shared search space and train each forest with n_trees trees.
-    Use up to n_trials evaluations, including any initial evaluations.
-    Select the best configuration using the validation objective, respecting
-    whether higher or lower values are better.
-    Return the selected configuration and results needed for your analysis.
+    Uses the shared search space (each hyperparameter is mapped to an index
+    into its list of choices) and trains each forest with n_trees trees.
+    Uses n_trials evaluations in total. The best configuration is the one with
+    the highest validation objective (higher is better).
+    Returns the best configuration and the full evaluation history.
     """
     if n_trials <= 0:
             raise ValueError("n_trials must be positive")
@@ -42,11 +42,14 @@ def optimise_smbo(
         return {k: choices[k][int(round(i))] for k, i in zip(keys, x)}
 
 
-    optimizer = Optimizer(fun=None, bounds=bounds, estimator="et", rng=seed) # smbo optimizer with Gaussian Process surrogate model
+    # SMBO optimizer with an Extra Trees ("et") surrogate model.
+    # Note: the space is discrete, so the optimizer may re-propose a
+    # configuration that was already evaluated.
+    optimizer = Optimizer(fun=None, bounds=bounds, estimator="et", rng=seed)
     
     tracked_configs = [] # List to track evaluated configurations
     best_config = None # this cool guy will be our best handler
-    best_objective = float("-inf")  # Assuming higher is better; adjust if lower
+    best_objective = float("-inf")  # Higher is better
 
     cumulative_time = 0.0  # To track the cumulative time taken for evaluations
 
@@ -65,11 +68,12 @@ def optimise_smbo(
              "configuration": config,
              "objective": results["objective"],
              "elapsed_sec": results["elapsed_sec"],
+             "cumulative_time": cumulative_time,
              "metrics": results["metrics"],
         })
 
         optimizer.tell([-results["objective"]])  # Update the optimizer with the new result 
-                                                 # (negative, since smbo minimizes by default)
+                                                 # (negative, since sambo minimizes by default)
 
         # Update the best configuration if this one is better
         if results["objective"] > best_objective:

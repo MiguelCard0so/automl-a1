@@ -17,8 +17,9 @@ from hyperband import optimise_hyperband
 from random_forest import final_test_evaluation, make_evaluator
 from random_search import optimise_random_search
 from smbo import optimise_smbo
-from tabular_foundation import run_foundation_model
+#from tabular_foundation import run_foundation_model
 import matplotlib.pyplot as plt
+import numpy as np
 
 # Update this if the provided largest dataset is replaced.
 FOUNDATION_DATASET = "covertype"
@@ -90,6 +91,7 @@ def run_dataset(name: str, args: argparse.Namespace) -> list[dict[str, Any]]:
             if method not in forest_methods:
                 continue
             start = perf_counter()
+            cumulative_time_list = None
             if method == "default":
                 config = {}  # Library defaults, with the common tree count.
                 history = [evaluator(config, max_trees, args.seed)]
@@ -110,7 +112,8 @@ def run_dataset(name: str, args: argparse.Namespace) -> list[dict[str, Any]]:
                 config, max_trees, args.seed, *final_arrays
             )
             print(f"{name} / {method} / seed {args.seed}: {final_result}", flush=True)
-            results.append({
+            print(f"{name} / {method} / selected configuration: {config}", flush=True)
+            result_entry = {
                 "dataset": name,
                 "method": method,
                 "seed": args.seed,
@@ -118,44 +121,65 @@ def run_dataset(name: str, args: argparse.Namespace) -> list[dict[str, Any]]:
                 "history": history,
                 "search_seconds": search_seconds,
                 "final_result": final_result,
-            })
+            }
+            if cumulative_time_list is not None:
+                result_entry["bracket_times"] = cumulative_time_list
+            results.append(result_entry)
 
-    if "foundation" in args.methods and name == FOUNDATION_DATASET:
-        result = run_foundation_model(splits, seed=args.seed)
-        print(f"{name} / foundation / seed {args.seed}: {result}", flush=True)
-        results.append({
-            "dataset": name,
-            "method": "foundation",
-            "seed": args.seed,
-            "result": result,
-        })
+    # Foundation model block (disabled; also uncomment the import at the top).
+    # if "foundation" in args.methods and name == FOUNDATION_DATASET:
+    #     result = run_foundation_model(splits, seed=args.seed)
+    #     print(f"{name} / foundation / seed {args.seed}: {result}", flush=True)
+    #     results.append({
+    #         "dataset": name,
+    #         "method": "foundation",
+    #         "seed": args.seed,
+    #         "result": result,
+    #     })
     return results
+
+
+def _json_default(obj: Any) -> Any:
+    """Make numpy scalars/arrays and other odd types JSON serialisable."""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if hasattr(obj, "item"):
+        return obj.item()
+    return str(obj)
 
 
 def main() -> None:
     """Run the selected examples; add result saving before the main study."""
 
     args = parse_args()
+    Path("results").mkdir(exist_ok=True)
+    max_trees = int(PROFILES[args.profile]["max_trees"])
     names = list(DATASETS) if args.dataset == "all" else [args.dataset]
     for name in names:
         print(f"Running {name} with seed {args.seed}", flush=True)
         results = run_dataset(name, args)
-        # TODO: save results in a format of your choice, along with the settings
+        
+        # save results in a format of your choice, along with the settings
         # needed to reproduce the run. Retain enough information for your plots
-        # and tables. This example only prints final results; it saves no files.
+        # and tables.
 
         ### SAVE RESULTS into a json file ###
         with open(f"results/results_{name}_seed{args.seed}.json", "w") as f:
             structured_results = {
                 "dataset": name,
                 "seed": args.seed,
+                "split_seed": args.split_seed,
+                "profile": args.profile,
+                "settings": PROFILES[args.profile],
                 "methods": [result["method"] for result in results],
                 "results": results,
             }
-            json.dump(structured_results, f, indent=4)
+            json.dump(structured_results, f, indent=4, default=_json_default)
 
 
         ### PLOT RESULTS(results, name, args.seed) ###
+        
+        # Plot objective values over evaluations/iterations for each method
         fig_objective, ax_objective = plt.subplots()
         for result in results:
             method = result["method"]
@@ -173,6 +197,7 @@ def main() -> None:
         ax_objective.set_xlabel("Evaluation")
         ax_objective.set_ylabel("Objective Value")
         ax_objective.set_title(f"Objective Value over Evaluations for {name} (seed={args.seed})")
+        
         if results:
             ax_objective.legend()
         fig_objective.tight_layout()
@@ -180,6 +205,8 @@ def main() -> None:
         plt.close(fig_objective)
 
         timed_results = [result for result in results if "search_seconds" in result]
+
+        # Plot search time for each method
         if timed_results:
             fig_time, ax_time = plt.subplots()
             ax_time.bar(
@@ -193,7 +220,58 @@ def main() -> None:
             fig_time.savefig(f"results/time_plot_{name}_seed{args.seed}.png")
             plt.close(fig_time)
 
+        # Plot final test AUROC versus total search wall-clock time
+        fig_final_auroc, ax_final_auroc = plt.subplots()
+        for result in results:
+            if "final_result" not in result or "search_seconds" not in result:
+                continue
 
+            score = result["final_result"]["metrics"]["auroc"]
+            seconds = result["search_seconds"]
+            ax_final_auroc.scatter(seconds, score)
 
+            ax_final_auroc.annotate(result["method"], (seconds, score), xytext=(5,4), textcoords="offset points")
+        
+        ax_final_auroc.set_xlabel("Search wall-clock time (in seconds)")
+        ax_final_auroc.set_ylabel("Final test AUROC")
+        ax_final_auroc.set_title("Final quality versus search cost")
+        fig_final_auroc.tight_layout()
+        fig_final_auroc.savefig(f"results/testAUROC_plot_{name}_seed{args.seed}.png")
+        plt.close(fig_final_auroc)
+
+        # Plot best validation AUROC versus cumulative evaluation time.
+        # The incumbent is only updated by full-fidelity evaluations
+        # (n_trees == max_trees), so low-fidelity Hyperband scores are not
+        # mixed with full-fidelity ones.
+        fig_best, ax_best = plt.subplots()
+        for result in results:
+            history = result.get("history", [])
+            timed = [
+                entry for entry in history
+                if "objective" in entry and "elapsed_sec" in entry
+            ]
+            
+            if not timed:
+                continue
+            
+            elapsed = np.cumsum([entry["elapsed_sec"] for entry in timed])
+            best = np.nan
+            best_so_far = []
+            for entry in timed:
+                if entry.get("n_trees", max_trees) == max_trees:
+                    best = np.fmax(best, entry["objective"])
+                best_so_far.append(best)
+            ax_best.step(elapsed, best_so_far, where="post", label=result["method"])
+
+        ax_best.set_xlabel("Cumulative evaluation time (seconds)")
+        ax_best.set_ylabel("Best validation AUROC so far")
+        ax_best.set_title("Search progress by evaluation time")
+        if ax_best.has_data():
+            ax_best.legend()
+        fig_best.tight_layout()
+        fig_best.savefig(f"results/validationAUROC_plot_{name}_seed{args.seed}.png")
+        plt.close(fig_best)
+
+ 
 if __name__ == "__main__":
     main()

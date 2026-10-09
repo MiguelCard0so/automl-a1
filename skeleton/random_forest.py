@@ -26,9 +26,10 @@ N_JOBS = 4
 # Optional starting point. Choose and justify a shared space and sampling rules,
 # or use your optimiser package's search-space tools. Keep tree count separate.
 SEARCH_SPACE = {
-    "max_depth": (None, 4, 16, 32, 64),
+    "max_depth": (None, 4, 8, 16, 32),
     "max_features": ("sqrt", 0.5, 1.0, "log2"),
-    "min_samples_leaf": (1, 2, 4, 8, 10),
+    "min_samples_leaf": (1, 2, 4, 8, 16),
+    "max_samples": (None, 2, 4, 16, 64)
 }
 
 
@@ -75,18 +76,24 @@ def predictive_metrics(
     y = np.argmax(y, axis=1) if y.ndim > 1 else y  # Convert one-hot to class labels if needed
 
     # Metrics
+
+    if y_proba.shape[1] == 2:
+        auroc = roc_auc_score(y, y_proba[:, 1])
+    else:
+        auroc = roc_auc_score(y, y_proba, multi_class="ovr",
+                              average="macro", labels=model.classes_)
+        
     accuracy = accuracy_score(y, y_pred) # accuracy
     r2 = r2_score(y, y_pred)  # R^2 score
-    precision = precision_score(y, y_pred)  # precision
-    recall = recall_score(y, y_pred)  # recall
-    f1 = f1_score(y, y_pred)  # F1 score
+    precision = precision_score(y, y_pred, average="macro", zero_division=0)  # precision
+    recall = recall_score(y, y_pred, average="macro", zero_division=0)  # recall
+    f1 = f1_score(y, y_pred, average="macro")  # F1 score
 
     return {"accuracy": accuracy,
              "r2": r2, 
              "precision": precision,
              "recall": recall,
-             "auroc": roc_auc_score(y, y_proba[:, 1], multi_class='ovr',
-                                    average='macro', labels=model.classes_),
+             "auroc": auroc,
              "f1": f1}
 
 
